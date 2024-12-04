@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+src/timefly/__init__.py
+src/timefly/kmeans.py
+src/timefly/profiling.py
+src/timefly/soft_dtw.py
+src/timefly.egg-info/PKG-INFO
+src/timefly.egg-info/SOURCES.txt
+src/timefly.egg-info/dependency_links.txt
+src/timefly.egg-info/requires.txt
+src/timefly.egg-info/top_level.txt
+test/test_soft_dtw.py

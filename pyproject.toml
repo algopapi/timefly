@@ -1,0 +1,28 @@
+[project]
+name = "timefly"
+description = "Lightweight kmeans clustering with cuda"
+version = "0.0.1"
+requires-python = ">=3.9"
+dependencies = [
+    "numba",
+    "torch",
+    "numpy",
+    "pytest"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["timefly"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+    "test" ,
+    "test/*"
+]

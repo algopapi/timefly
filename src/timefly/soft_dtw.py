@@ -19,7 +19,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-# ----------------------------------------------------------------------------------------------------------------------
+
 import time
 import numpy as np
 import torch
@@ -74,7 +74,6 @@ def compute_softdtw_cuda(D, gamma, bandwidth, max_i, max_j, n_passes, R):
         # Wait for other threads in this block
         cuda.syncthreads()
 
-# ----------------------------------------------------------------------------------------------------------------------
 @cuda.jit
 def compute_softdtw_backward_cuda(D, R, inv_gamma, bandwidth, max_i, max_j, n_passes, E):
     k = cuda.blockIdx.x
@@ -110,13 +109,105 @@ def compute_softdtw_backward_cuda(D, R, inv_gamma, bandwidth, max_i, max_j, n_pa
         # Wait for other threads in this block
         cuda.syncthreads()
 
+# ---------------------------------------------------------------------------------------------------------------------- #
+# The following is the CPU implementation based on https://github.com/Sleepwalking/pytorch-softdtw
+# Credit goes to Kanru Hua.
+# I've added support for batching and pruning.
+#
 # ----------------------------------------------------------------------------------------------------------------------
+@jit(nopython=True, parallel=True)
+def compute_softdtw(D, gamma, bandwidth):
+    B = D.shape[0]
+    N = D.shape[1]
+    M = D.shape[2]
+    R = np.ones((B, N + 2, M + 2)) * np.inf
+    R[:, 0, 0] = 0
+    for b in prange(B):
+        for j in range(1, M + 1):
+            for i in range(1, N + 1):
+
+                # Check the pruning condition
+                if 0 < bandwidth < np.abs(i - j):
+                    continue
+
+                r0 = -R[b, i - 1, j - 1] / gamma
+                r1 = -R[b, i - 1, j] / gamma
+                r2 = -R[b, i, j - 1] / gamma
+                rmax = max(max(r0, r1), r2)
+                rsum = np.exp(r0 - rmax) + np.exp(r1 - rmax) + np.exp(r2 - rmax)
+                softmin = - gamma * (np.log(rsum) + rmax)
+                R[b, i, j] = D[b, i - 1, j - 1] + softmin
+    return R
+
+@jit(nopython=True, parallel=True)
+def compute_softdtw_backward(D_, R, gamma, bandwidth):
+    B = D_.shape[0]
+    N = D_.shape[1]
+    M = D_.shape[2]
+    D = np.zeros((B, N + 2, M + 2))
+    E = np.zeros((B, N + 2, M + 2))
+    D[:, 1:N + 1, 1:M + 1] = D_
+    E[:, -1, -1] = 1
+    R[:, :, -1] = -np.inf
+    R[:, -1, :] = -np.inf
+    R[:, -1, -1] = R[:, -2, -2]
+    for k in prange(B):
+        for j in range(M, 0, -1):
+            for i in range(N, 0, -1):
+
+                if np.isinf(R[k, i, j]):
+                    R[k, i, j] = -np.inf
+
+                # Check the pruning condition
+                if 0 < bandwidth < np.abs(i - j):
+                    continue
+
+                a0 = (R[k, i + 1, j] - R[k, i, j] - D[k, i + 1, j]) / gamma
+                b0 = (R[k, i, j + 1] - R[k, i, j] - D[k, i, j + 1]) / gamma
+                c0 = (R[k, i + 1, j + 1] - R[k, i, j] - D[k, i + 1, j + 1]) / gamma
+                a = np.exp(a0)
+                b = np.exp(b0)
+                c = np.exp(c0)
+                E[k, i, j] = E[k, i + 1, j] * a + E[k, i, j + 1] * b + E[k, i + 1, j + 1] * c
+    return E[:, 1:N + 1, 1:M + 1]
+
+
+# ------------------------------------------------------------------------------------------------------------------
+class _SoftDTW(Function):
+    """
+    CPU implementation based on https://github.com/Sleepwalking/pytorch-softdtw
+    """
+    @staticmethod
+    def forward(ctx, D, gamma, bandwidth):
+        dev = D.device
+        dtype = D.dtype
+        gamma = torch.Tensor([gamma]).to(dev).type(dtype)  # dtype fixed
+        bandwidth = torch.Tensor([bandwidth]).to(dev).type(dtype)
+        D_ = D.detach().cpu().numpy()
+        g_ = gamma.item()
+        b_ = bandwidth.item()
+        R = torch.Tensor(compute_softdtw(D_, g_, b_)).to(dev).type(dtype)
+        ctx.save_for_backward(D, R, gamma, bandwidth)
+        return R[:, -2, -2]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        dev = grad_output.device
+        dtype = grad_output.dtype
+        D, R, gamma, bandwidth = ctx.saved_tensors
+        D_ = D.detach().cpu().numpy()
+        R_ = R.detach().cpu().numpy()
+        g_ = gamma.item()
+        b_ = bandwidth.item()
+        E = torch.Tensor(compute_softdtw_backward(D_, R_, g_, b_)).to(dev).type(dtype)
+        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None
+
+
 class _SoftDTWCUDA(Function):
     """
     CUDA implementation is inspired by the diagonal one proposed in https://ieeexplore.ieee.org/document/8400444:
     "Developing a pattern discovery method in time series data and its GPU acceleration"
     """
-
     @staticmethod
     def forward(ctx, D, gamma, bandwidth):
         dev = D.device
@@ -181,98 +272,6 @@ class _SoftDTWCUDA(Function):
         E = E[:, 1:N + 1, 1:M + 1]
         return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None
 
-# ---------------------------------------------------------------------------------------------------------------------- #
-# The following is the CPU implementation based on https://github.com/Sleepwalking/pytorch-softdtw
-# Credit goes to Kanru Hua.
-# I've added support for batching and pruning.
-#
-# ----------------------------------------------------------------------------------------------------------------------
-@jit(nopython=True, parallel=True)
-def compute_softdtw(D, gamma, bandwidth):
-    B = D.shape[0]
-    N = D.shape[1]
-    M = D.shape[2]
-    R = np.ones((B, N + 2, M + 2)) * np.inf
-    R[:, 0, 0] = 0
-    for b in prange(B):
-        for j in range(1, M + 1):
-            for i in range(1, N + 1):
-
-                # Check the pruning condition
-                if 0 < bandwidth < np.abs(i - j):
-                    continue
-
-                r0 = -R[b, i - 1, j - 1] / gamma
-                r1 = -R[b, i - 1, j] / gamma
-                r2 = -R[b, i, j - 1] / gamma
-                rmax = max(max(r0, r1), r2)
-                rsum = np.exp(r0 - rmax) + np.exp(r1 - rmax) + np.exp(r2 - rmax)
-                softmin = - gamma * (np.log(rsum) + rmax)
-                R[b, i, j] = D[b, i - 1, j - 1] + softmin
-    return R
-
-# ----------------------------------------------------------------------------------------------------------------------
-@jit(nopython=True, parallel=True)
-def compute_softdtw_backward(D_, R, gamma, bandwidth):
-    B = D_.shape[0]
-    N = D_.shape[1]
-    M = D_.shape[2]
-    D = np.zeros((B, N + 2, M + 2))
-    E = np.zeros((B, N + 2, M + 2))
-    D[:, 1:N + 1, 1:M + 1] = D_
-    E[:, -1, -1] = 1
-    R[:, :, -1] = -np.inf
-    R[:, -1, :] = -np.inf
-    R[:, -1, -1] = R[:, -2, -2]
-    for k in prange(B):
-        for j in range(M, 0, -1):
-            for i in range(N, 0, -1):
-
-                if np.isinf(R[k, i, j]):
-                    R[k, i, j] = -np.inf
-
-                # Check the pruning condition
-                if 0 < bandwidth < np.abs(i - j):
-                    continue
-
-                a0 = (R[k, i + 1, j] - R[k, i, j] - D[k, i + 1, j]) / gamma
-                b0 = (R[k, i, j + 1] - R[k, i, j] - D[k, i, j + 1]) / gamma
-                c0 = (R[k, i + 1, j + 1] - R[k, i, j] - D[k, i + 1, j + 1]) / gamma
-                a = np.exp(a0)
-                b = np.exp(b0)
-                c = np.exp(c0)
-                E[k, i, j] = E[k, i + 1, j] * a + E[k, i, j + 1] * b + E[k, i + 1, j + 1] * c
-    return E[:, 1:N + 1, 1:M + 1]
-
-# ----------------------------------------------------------------------------------------------------------------------
-class _SoftDTW(Function):
-    """
-    CPU implementation based on https://github.com/Sleepwalking/pytorch-softdtw
-    """
-    @staticmethod
-    def forward(ctx, D, gamma, bandwidth):
-        dev = D.device
-        dtype = D.dtype
-        gamma = torch.Tensor([gamma]).to(dev).type(dtype)  # dtype fixed
-        bandwidth = torch.Tensor([bandwidth]).to(dev).type(dtype)
-        D_ = D.detach().cpu().numpy()
-        g_ = gamma.item()
-        b_ = bandwidth.item()
-        R = torch.Tensor(compute_softdtw(D_, g_, b_)).to(dev).type(dtype)
-        ctx.save_for_backward(D, R, gamma, bandwidth)
-        return R[:, -2, -2]
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        dev = grad_output.device
-        dtype = grad_output.dtype
-        D, R, gamma, bandwidth = ctx.saved_tensors
-        D_ = D.detach().cpu().numpy()
-        R_ = R.detach().cpu().numpy()
-        g_ = gamma.item()
-        b_ = bandwidth.item()
-        E = torch.Tensor(compute_softdtw_backward(D_, R_, g_, b_)).to(dev).type(dtype)
-        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None
 
 # ----------------------------------------------------------------------------------------------------------------------
 class SoftDTW(torch.nn.Module):
@@ -347,8 +346,9 @@ class SoftDTW(torch.nn.Module):
         if not isinstance(Y, torch.Tensor):
             Y = torch.from_numpy(Y)
 
-        X = X.cuda() 
-        Y = Y.cuda() 
+        if self.use_cuda:
+            X = X.cuda()
+            Y = Y.cuda() 
 
         # Check the inputs and get the correct implementation
         func_dtw = self._get_func_dtw(X, Y)
@@ -366,43 +366,18 @@ class SoftDTW(torch.nn.Module):
             return func_dtw(D_xy, self.gamma, self.bandwidth)
 
 
-class BaryCenterSoftDTW(torch.nn.Module):
-    def __init__(
-            self, 
-            gamma: float=1.0,
-            precision=torch.float32
-    ):
-        super(BaryCenterSoftDTW, self).__init__()
-        self.gamma = gamma
-        self.precision = precision
-        self.bandwith = 0
-        self.forward_func = _SoftDTWCUDA.apply
-
-    def forward(self, D):
-        outs = self.forward_func(D, self.gamma, self.bandwidth)        
-        self.grad_ouputs = torch.ones_like(outs)
-        return outs
-
-    def backward(self, forward_outs, a):
-        outs = torch.autograd.grad(
-            forward_outs, 
-            a, 
-            grad_outputs=self.grad_outputs
-        )
-
-        return outs
-
-# ----------------------------------------------------------------------------------------------------------------------
 class PairwiseSoftDTW(torch.nn.Module):
     def __init__(
             self, 
             gamma: float = 1.0, 
-            precision=torch.float32
+            precision=torch.float32,
+            use_cuda: bool = True
         ):
         super(PairwiseSoftDTW, self).__init__()
         self.gamma = gamma
         self.precision = precision
         self.bandwidth = 0
+        self.use_cuda = cuda
 
     @staticmethod
     def _batch_euclidean_dist(A, B):
@@ -416,9 +391,6 @@ class PairwiseSoftDTW(torch.nn.Module):
         Returns:
             D: Tensor of shape (n_a, n_b, seq_len, seq_len)
         """
-        n_a, seq_len, dims = A.shape
-        n_b = B.shape[0]
-
         # Expand A and B for broadcasting
         A_exp = A.unsqueeze(1).unsqueeze(3)   # Shape: (n_a, 1, seq_len, 1, dims)
         B_exp = B.unsqueeze(0).unsqueeze(2)   # Shape: (1, n_b, 1, seq_len, dims)
@@ -457,79 +429,3 @@ class PairwiseSoftDTW(torch.nn.Module):
         D_dist = distances.view(n_a, n_b) 
         
         return D_dist 
-
-# ----------------------------------------------------------------------------------------------------------------------
-def timed_run(a, b, sdtw):
-    """
-    Runs a and b through sdtw, and times the forward and backward passes.
-    Assumes that a requires gradients.
-    :return: timing, forward result, backward result
-    """
-    from timeit import default_timer as timer
-
-    # Forward pass
-    start = timer()
-    forward = sdtw(a, b)
-    end = timer()
-    t = end - start
-
-    grad_outputs = torch.ones_like(forward)
-
-    # Backward
-    start = timer()
-    grads = torch.autograd.grad(forward, a, grad_outputs=grad_outputs)[0]
-    end = timer()
-
-    # Total time
-    t += end - start
-
-    return t, forward, grads
-
-# ----------------------------------------------------------------------------------------------------------------------
-def profile(batch_size, seq_len_a, seq_len_b, dims, tol_backward):
-    sdtw = SoftDTW(False, gamma=1.0, normalize=False)
-    sdtw_cuda = SoftDTW(True, gamma=1.0, normalize=False)
-    n_iters = 6
-
-    print("Profiling forward() + backward() times for batch_size={}, seq_len_a={}, seq_len_b={}, dims={}...".format(batch_size, seq_len_a, seq_len_b, dims))
-
-    times_cpu = []
-    times_gpu = []
-
-    for i in range(n_iters):
-        a_cpu = torch.rand((batch_size, seq_len_a, dims), requires_grad=True)
-        b_cpu = torch.rand((batch_size, seq_len_b, dims))
-        a_gpu = a_cpu.cuda()
-        b_gpu = b_cpu.cuda()
-
-        # GPU
-        t_gpu, forward_gpu, backward_gpu = timed_run(a_gpu, b_gpu, sdtw_cuda)
-
-        # CPU
-        t_cpu, forward_cpu, backward_cpu = timed_run(a_cpu, b_cpu, sdtw)
-
-        # Verify the results
-        assert torch.allclose(forward_cpu, forward_gpu.cpu())
-        assert torch.allclose(backward_cpu, backward_gpu.cpu(), atol=tol_backward)
-
-        if i > 0:  # Ignore the first time we run, in case this is a cold start (because timings are off at a cold start of the script)
-            times_cpu += [t_cpu]
-            times_gpu += [t_gpu]
-
-    # Average and log
-    avg_cpu = np.mean(times_cpu)
-    avg_gpu = np.mean(times_gpu)
-    print("  CPU:     ", avg_cpu)
-    print("  GPU:     ", avg_gpu)
-    print("  Speedup: ", avg_cpu / avg_gpu)
-    print()
-
-# ----------------------------------------------------------------------------------------------------------------------
-if __name__ == "__main__":
-    from timeit import default_timer as timer
-
-    torch.manual_seed(1234)
-
-    profile(1, 124, 15, 1, tol_backward=1e-6)
-    profile(512, 64, 64, 2, tol_backward=1e-4)
-    profile(512, 256, 256, 2, tol_backward=1e-3)

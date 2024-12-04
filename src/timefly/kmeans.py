@@ -1,10 +1,9 @@
 import torch
 import numpy as np
 
-from SOFTDTW.soft_dtw_cuda import PairwiseSoftDTW, _SoftDTWCUDA, SoftDTW
-from SOFTDTW.soft_dtw_barycenter import SoftDTWBarycenter
+from timefly.soft_dtw import PairwiseSoftDTW, SoftDTW
 
-class TimeSeriesKMeansTorch:
+class TimeSeriesKMeans:
     """TimeSeries K-Means clustering using SoftDTW and PyTorch.
 
     Parameters
@@ -57,7 +56,9 @@ class TimeSeriesKMeansTorch:
         self.max_iter_barycenter = 10
         self.barycenter = SoftDTW(use_cuda=True, gamma=self.gamma) 
         self.distance = PairwiseSoftDTW(gamma=self.gamma)
-        self.optimizer = optimizer
+        self.optimizer = optimizer 
+        # lbfgs is used by default but we probably 
+        # want to use Adam here instead 
         self.optimizer_kwargs = optimizer_kwargs 
 
     def fit(self, X):
@@ -225,7 +226,6 @@ class TimeSeriesKMeansTorch:
             distance_to_candidates = self.distance(X[c_ids], X) ** 2
 
             # Update closest distances squared and potential for each candidate
-            # shape (3,)
             closest_dist_sq_candidate = torch.minimum(
                 closest_dist_sq, 
                 distance_to_candidates
