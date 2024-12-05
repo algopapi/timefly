@@ -4,12 +4,23 @@ description = "Lightweight kmeans clustering with cuda"
 version = "0.0.1"
 requires-python = ">=3.9"
 dependencies = [
+    "numpy",
     "numba",
     "torch",
-    "numpy",
+    "torchvision",
+    "tqdm",
     "pytest"
 ]
 
+# Somehow because pip tends to install the non-cuda version of torch we have
+# to explicitally force it into the cuda version 
+[tool.uv.sources]
+torch = { index = "pytorch_cuda"}
+
+[[tool.uv.index]]
+name = 'pytorch_cuda'
+url = "https://download.pytorch.org/whl/cu124"
+ 
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"

@@ -282,6 +282,7 @@ class SoftDTW(torch.nn.Module):
             self, 
             use_cuda, 
             gamma=1.0, 
+            batch_size=1,
             normalize=False, 
             bandwidth=None, 
             dist_func=None
@@ -298,6 +299,7 @@ class SoftDTW(torch.nn.Module):
         super(SoftDTW, self).__init__()
         self.normalize = normalize
         self.gamma = gamma
+        self.batch_size = batch_size
         self.bandwidth = 0 if bandwidth is None else float(bandwidth)
         self.use_cuda = use_cuda
 
