@@ -28,6 +28,7 @@ from numba import jit, prange
 from torch.autograd import Function
 from numba import cuda
 import math
+import gc
 
 # ----------------------------------------------------------------------------------------------------------------------
 @cuda.jit
@@ -178,7 +179,7 @@ class _SoftDTW(Function):
     CPU implementation based on https://github.com/Sleepwalking/pytorch-softdtw
     """
     @staticmethod
-    def forward(ctx, D, gamma, bandwidth):
+    def forward(ctx, D, gamma, bandwidth, requires_grad):
         dev = D.device
         dtype = D.dtype
         gamma = torch.Tensor([gamma]).to(dev).type(dtype)  # dtype fixed
@@ -186,8 +187,10 @@ class _SoftDTW(Function):
         D_ = D.detach().cpu().numpy()
         g_ = gamma.item()
         b_ = bandwidth.item()
-        R = torch.Tensor(compute_softdtw(D_, g_, b_)).to(dev).type(dtype)
-        ctx.save_for_backward(D, R, gamma, bandwidth)
+        softdtw = compute_softdtw(D_, g_, b_)
+        R = torch.Tensor(softdtw).to(dev).type(dtype)
+        if requires_grad:
+            ctx.save_for_backward(D, R, gamma, bandwidth)
         return R[:, -2, -2]
 
     @staticmethod
@@ -200,7 +203,7 @@ class _SoftDTW(Function):
         g_ = gamma.item()
         b_ = bandwidth.item()
         E = torch.Tensor(compute_softdtw_backward(D_, R_, g_, b_)).to(dev).type(dtype)
-        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None
+        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None, None
 
 
 class _SoftDTWCUDA(Function):
@@ -209,7 +212,7 @@ class _SoftDTWCUDA(Function):
     "Developing a pattern discovery method in time series data and its GPU acceleration"
     """
     @staticmethod
-    def forward(ctx, D, gamma, bandwidth):
+    def forward(ctx, D, gamma, bandwidth, requires_grad):
         dev = D.device
         dtype = D.dtype
         gamma = torch.cuda.FloatTensor([gamma])
@@ -237,7 +240,11 @@ class _SoftDTWCUDA(Function):
             n_passes,
             cuda.as_cuda_array(R)
         )
-        ctx.save_for_backward(D, R.clone(), gamma, bandwidth)
+
+        # only save for backward if requires grad is True
+        if requires_grad:
+            ctx.save_for_backward(D, R.clone(), gamma, bandwidth)
+
         return R[:, -2, -2]
 
     @staticmethod
@@ -270,7 +277,7 @@ class _SoftDTWCUDA(Function):
             cuda.as_cuda_array(E)
         )
         E = E[:, 1:N + 1, 1:M + 1]
-        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None
+        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None, None
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -285,7 +292,8 @@ class SoftDTW(torch.nn.Module):
             batch_size=1,
             normalize=False, 
             bandwidth=None, 
-            dist_func=None
+            dist_func=None,
+            requires_grad=False
         ):
         """
         Initializes a new instance using the supplied parameters
@@ -302,12 +310,15 @@ class SoftDTW(torch.nn.Module):
         self.batch_size = batch_size
         self.bandwidth = 0 if bandwidth is None else float(bandwidth)
         self.use_cuda = use_cuda
-
-        # Set the distance function
+        
+        # set distance function
         if dist_func is not None:
             self.dist_func = dist_func
         else:
             self.dist_func = SoftDTW._euclidean_dist_func
+
+        self.requires_grad = requires_grad
+        self.requires_grad_(requires_grad)
 
     def _get_func_dtw(self, x, y):
         """
@@ -364,8 +375,20 @@ class SoftDTW(torch.nn.Module):
             out_xy, out_xx, out_yy = torch.split(out, X.shape[0])
             return out_xy - 1 / 2 * (out_xx + out_yy)
         else:
+            print(f"\nmemory before distance:{torch.cuda.memory_allocated()}")
+
+            # with torch.set_grad_enabled(self.requires_grad):
             D_xy = self.dist_func(X, Y)
-            return func_dtw(D_xy, self.gamma, self.bandwidth)
+            print(f"memory after distance:{torch.cuda.memory_allocated()}")
+
+            output = func_dtw(D_xy, self.gamma, self.bandwidth, self.requires_grad)
+            print(f"memory after dtw:{torch.cuda.memory_allocated()}")
+
+            del D_xy, X, Y
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(f"memory after dtw:{torch.cuda.memory_allocated()}")
+            return output 
 
 
 class PairwiseSoftDTW(torch.nn.Module):
@@ -419,6 +442,7 @@ class PairwiseSoftDTW(torch.nn.Module):
 
         n_a, t_x, d_x = X.shape
         n_b, t_y, d_y = Y.shape
+
         assert t_x == t_y
         assert d_x == d_y
         t = t_x 
@@ -427,7 +451,12 @@ class PairwiseSoftDTW(torch.nn.Module):
         D_flat = D.view(-1, t, t)
 
         func_dtw = _SoftDTWCUDA.apply
-        distances = func_dtw(D_flat, self.gamma, self.bandwidth)
+        distances = func_dtw(
+            D_flat, 
+            self.gamma, 
+            self.bandwidth, 
+            requires_grad=False
+        )
         D_dist = distances.view(n_a, n_b) 
         
         return D_dist 

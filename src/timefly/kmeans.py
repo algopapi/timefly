@@ -77,15 +77,13 @@ class TimeSeriesKMeans:
         """
         # Convert data to torch tensor
         X = torch.tensor(X, dtype=torch.float32).to(self.device)
-        n_samples = X.shape[0]
 
         best_inertia = float('inf')
         best_labels = None
         best_centers = None
 
         for init_no in range(self.n_init):
-            random_state = None if self.n_init == 1 else torch.randint(0, 10000, (1,)).item()
-            labels, inertia, centers = self.fit_one_init(X, random_state=random_state)
+            labels, inertia, centers = self._fit_one_init(X)
 
             if inertia < best_inertia:
                 best_inertia = inertia
@@ -115,7 +113,7 @@ class TimeSeriesKMeans:
         labels = torch.argmin(distances, dim=1)
         return labels.cpu().numpy()
 
-    def _fit_one_init(self, X, rs=None):
+    def _fit_one_init(self, X):
         """
         Initialize cluster centers and perform clustering with one initialization.
 
@@ -139,7 +137,7 @@ class TimeSeriesKMeans:
         n_samples = X.shape[0]
 
         # Initialize cluster centers using k-means++
-        cluster_centers = self._k_means_init(X, rs=rs).clone().requires_grad_(True)
+        cluster_centers = self._k_means_init(X).clone().requires_grad_(True)
 
         for i in range(self.max_iter):
             # Compute distances between each time series and each cluster center
@@ -176,7 +174,7 @@ class TimeSeriesKMeans:
 
         return labels, inertia.item(), cluster_centers
 
-    def _k_means_init(self, X, rs):
+    def _k_means_init(self, X):
         """
         Initialize cluster centers using the k-means++ algorithm.
 
@@ -200,7 +198,7 @@ class TimeSeriesKMeans:
         centers = torch.empty((n_clusters, t, d), dtype=X.dtype, device=X.device)
 
         # Choose the first center using NumPy's random_state
-        c_id = rs.randint(0, n)
+        c_id = self.random_state.randint(0, n)
         centers[0] = X[c_id]
 
         # Initialize list of squared distances to closest center
@@ -209,7 +207,7 @@ class TimeSeriesKMeans:
 
         for c in range(1, n_clusters):
             # Generate rand_vals using NumPy's random_state
-            rand_vals_np = rs.random_sample(n_local_trials) * current_pot
+            rand_vals_np = self.rs.random_sample(n_local_trials) * current_pot
 
             # Convert rand_vals to PyTorch tensor on GPU with appropriate dtype
             rand_vals = torch.from_numpy(rand_vals_np).to(
@@ -218,7 +216,10 @@ class TimeSeriesKMeans:
             )
 
             # Compute cumulative sum of distances
-            c_ids = torch.searchsorted(torch.cumsum(closest_dist_sq.flatten(), dim=0), rand_vals)
+            c_ids = torch.searchsorted(
+                torch.cumsum(closest_dist_sq.flatten(), dim=0), 
+                rand_vals
+            )
             max = closest_dist_sq.size(1) -1
             c_ids = torch.clamp(c_ids, min=None, max=max)
 

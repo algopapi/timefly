@@ -1,11 +1,16 @@
 import torch
-from timefly import TimeSeriesKMeans
+from timefly.kmeans import TimeSeriesKMeans
+from timefly.soft_dtw import SoftDTW
 
 if not torch.cuda.is_available():
     print('CUDA is not available. do u have a GPU?')
     exit()
 
 device = 'cuda'
+
+# TEst cpu implementation 
+X = torch.rand(2, 10, 2, requires_grad=True)
+Y = torch.rand(2, 10, 2, requires_grad=True)
 
 n_clusters = 10
 n_features = 1
