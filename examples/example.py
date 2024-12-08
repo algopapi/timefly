@@ -9,10 +9,10 @@ if not torch.cuda.is_available():
 
 device = 'cuda'
 
-n_clusters = 10
+n_clusters = r
 n_features = 1
-time_series_len = 100
-num_series = 4000
+time_series_len = 1000
+num_series = 40000
 
 X_train = torch.rand(num_series, time_series_len, n_features)
 

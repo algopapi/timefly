@@ -43,7 +43,7 @@ class TimeSeriesKMeans:
             device='cuda', 
             n_init=1,
             random_state=None,
-            optimizer = 'lbfgs',
+            optimizer = 'adam',
             optimizer_kwargs={'lr': 1.0}
         ):
         self.n_clusters = n_clusters
@@ -54,15 +54,15 @@ class TimeSeriesKMeans:
         self.device = device
         self.n_init = n_init
         self.max_iter_barycenter = 10
-        self.barycenter = SoftDTW(
-            use_cuda=True, 
-            requires_grad=True,
-            gamma=self.gamma,
-        ) 
+        # self.barycenter = SoftDTW(
+        #     use_cuda=True, 
+        #     requires_grad=True,
+        #     gamma=self.gamma,
+        # ) 
 
-        self.distance = PairwiseSoftDTW(
-            gamma=self.gamma,
-        )
+        # self.distance = PairwiseSoftDTW(
+        #     gamma=self.gamma,
+        # )
 
         self.dtw = BatchedSoftDTW(
             gamma=self.gamma,
@@ -70,6 +70,7 @@ class TimeSeriesKMeans:
         )
         self.optimizer = optimizer 
         self.optimizer_kwargs = optimizer_kwargs 
+        self.update_bs = 1000 
 
     def fit(self, X):
         """
@@ -119,10 +120,8 @@ class TimeSeriesKMeans:
             Index of the cluster each sample belongs to.
         """
         X = torch.tensor(X, dtype=torch.float32).to(self.device)
-        distances = self.distance(X, self.cluster_centers_)
-        distances_2 = self.dtw.pairwise(self.cluster_centers_, X, with_grads=False).transpose(1, 0)
-
-        assert torch.allclose(distances, distances_2)
+        # distances = self.distance(X, self.cluster_centers_)
+        distances = self.dtw.pairwise(self.cluster_centers_, X, with_grads=False).transpose(1, 0)
 
         labels = torch.argmin(distances, dim=1)
 
@@ -309,10 +308,8 @@ class TimeSeriesKMeans:
                     centroid_expanded = centroid.unsqueeze(0).expand(
                         batch_X.shape[0], -1, -1
                     )
-                    sdtw_values = self.barycenter(centroid_expanded, batch_X)
-                    sdtw_values_2 = self.dtw.elementwise(centroid_expanded, batch_X, with_grads=True)
-                    assert torch.allclose(sdtw_values, sdtw_values_2)
-                    print(torch.allclose(sdtw_values, sdtw_values_2))
+                    # sdtw_values = self.barycenter(centroid_expanded, batch_X)
+                    sdtw_values = self.dtw.elementwise(centroid_expanded, batch_X, with_grads=True)
                     loss = sdtw_values.mean()
                     loss.backward()
                     total_loss += loss.item() * batch_X.shape[0]
