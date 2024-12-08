@@ -8,7 +8,7 @@
             "module": "timefly",
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}"
+                "PYTHONPATH": "${workspaceFolder}.src.timefly"
             }
         }
     ]

@@ -2,38 +2,29 @@
 name = "timefly"
 description = "Lightweight kmeans clustering with cuda"
 version = "0.0.1"
-requires-python = ">=3.9"
-dependencies = [
-    "numpy",
-    "numba",
-    "torch",
-    "torchvision",
-    "tqdm",
-    "pytest"
-]
+requires-python = ">=3.12, <3.13"
+dependencies = ["numpy", "numba>=0.59", "torch", "tqdm", "pytest"]
 
-# Somehow because pip tends to install the non-cuda version of torch we have
-# to explicitally force it into the cuda version 
-[tool.uv.sources]
-torch = { index = "pytorch_cuda"}
+# Comment this out if ur machine does not install the cuda compiled version 
+# of torch 
 
-[[tool.uv.index]]
-name = 'pytorch_cuda'
-url = "https://download.pytorch.org/whl/cu124"
- 
+# [tool.uv.sources]
+# torch = { index = "pytorch_cuda" }
+
+# [[tool.uv.index]]
+# name = 'pytorch_cuda'
+# url = "https://download.pytorch.org/whl/cu124"
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
 packages = ["timefly"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
 # addopts = "-vv --full-trace"
-testpaths = [
-    "tests",
-    "test" ,
-    "test/*"
-]
+addopts = "-s"
+testpaths = ["tests"]

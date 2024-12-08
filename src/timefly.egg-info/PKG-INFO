@@ -2,10 +2,9 @@ Metadata-Version: 2.1
 Name: timefly
 Version: 0.0.1
 Summary: Lightweight kmeans clustering with cuda
-Requires-Python: >=3.9
+Requires-Python: <3.13,>=3.12
 Requires-Dist: numpy
-Requires-Dist: numba
+Requires-Dist: numba>=0.59
 Requires-Dist: torch
-Requires-Dist: torchvision
 Requires-Dist: tqdm
 Requires-Dist: pytest

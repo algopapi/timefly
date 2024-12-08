@@ -28,7 +28,7 @@ from numba import jit, prange
 from torch.autograd import Function
 from numba import cuda
 import math
-import gc
+from tqdm import tqdm
 
 # ----------------------------------------------------------------------------------------------------------------------
 @cuda.jit
@@ -212,7 +212,7 @@ class _SoftDTWCUDA(Function):
     "Developing a pattern discovery method in time series data and its GPU acceleration"
     """
     @staticmethod
-    def forward(ctx, D, gamma, bandwidth, requires_grad):
+    def forward(ctx, D, gamma, bandwidth, requires_grad):   
         dev = D.device
         dtype = D.dtype
         gamma = torch.cuda.FloatTensor([gamma])
@@ -279,7 +279,6 @@ class _SoftDTWCUDA(Function):
         E = E[:, 1:N + 1, 1:M + 1]
         return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None, None
 
-
 # ----------------------------------------------------------------------------------------------------------------------
 class SoftDTW(torch.nn.Module):
     """
@@ -287,13 +286,13 @@ class SoftDTW(torch.nn.Module):
     """
     def __init__(
             self, 
-            use_cuda, 
-            gamma=1.0, 
-            batch_size=1,
-            normalize=False, 
-            bandwidth=None, 
-            dist_func=None,
-            requires_grad=False
+            use_cuda:bool=True, 
+            gamma:float=1.0, 
+            batch_size:float=3e3,
+            normalize:bool=False, 
+            bandwidth:float=None, 
+            requires_grad:bool=False,
+            device=None
         ):
         """
         Initializes a new instance using the supplied parameters
@@ -307,18 +306,16 @@ class SoftDTW(torch.nn.Module):
         super(SoftDTW, self).__init__()
         self.normalize = normalize
         self.gamma = gamma
-        self.batch_size = batch_size
+        self.batch_size = int(batch_size)
         self.bandwidth = 0 if bandwidth is None else float(bandwidth)
         self.use_cuda = use_cuda
-        
-        # set distance function
-        if dist_func is not None:
-            self.dist_func = dist_func
-        else:
-            self.dist_func = SoftDTW._euclidean_dist_func
 
         self.requires_grad = requires_grad
         self.requires_grad_(requires_grad)
+        self.device = device if device is not None else torch.device('cuda' if use_cuda else 'cpu')
+
+        # set distance function
+        self.dist_func = SoftDTW._euclidean_dist_func
 
     def _get_func_dtw(self, x, y):
         """
@@ -359,36 +356,25 @@ class SoftDTW(torch.nn.Module):
         if not isinstance(Y, torch.Tensor):
             Y = torch.from_numpy(Y)
 
+        # TODO: Add precision support
         if self.use_cuda:
-            X = X.cuda()
-            Y = Y.cuda() 
+            X = X.to(self.device)
+            Y = Y.to(self.device) 
 
         # Check the inputs and get the correct implementation
         func_dtw = self._get_func_dtw(X, Y)
 
-        if self.normalize:
-            # Stack everything up and run
-            x = torch.cat([X, X, Y])
-            y = torch.cat([Y, X, Y])
-            D = self.dist_func(x, y)
-            out = func_dtw(D, self.gamma, self.bandwidth)
-            out_xy, out_xx, out_yy = torch.split(out, X.shape[0])
-            return out_xy - 1 / 2 * (out_xx + out_yy)
-        else:
-            print(f"\nmemory before distance:{torch.cuda.memory_allocated()}")
+        output = torch.empty(X.shape[0], dtype=X.dtype, device=self.device)
+        with torch.set_grad_enabled(self.requires_grad):
+           for i in range(0, X.shape[0], self.batch_size):
+                end_i = min(X.shape[0], i + self.batch_size)
+                D_i = self.dist_func(X[i:end_i], Y[i:end_i]) #(batch_size, seq_len_1, seq_len_2) 
+                output[i:end_i]= func_dtw(D_i, self.gamma, self.bandwidth, True)
 
-            # with torch.set_grad_enabled(self.requires_grad):
-            D_xy = self.dist_func(X, Y)
-            print(f"memory after distance:{torch.cuda.memory_allocated()}")
-
-            output = func_dtw(D_xy, self.gamma, self.bandwidth, self.requires_grad)
-            print(f"memory after dtw:{torch.cuda.memory_allocated()}")
-
-            del D_xy, X, Y
-            gc.collect()
-            torch.cuda.empty_cache()
-            print(f"memory after dtw:{torch.cuda.memory_allocated()}")
-            return output 
+        # del D_i, X, Y
+        # gc.collect()
+        # torch.cuda.empty_cache()
+        return output 
 
 
 class PairwiseSoftDTW(torch.nn.Module):
@@ -426,6 +412,7 @@ class PairwiseSoftDTW(torch.nn.Module):
 
         return dist_sq  # Shape: (n_a, n_b, seq_len, seq_len)
 
+
     def forward(self, X, Y):
         """
         input args:
@@ -446,7 +433,7 @@ class PairwiseSoftDTW(torch.nn.Module):
         assert t_x == t_y
         assert d_x == d_y
         t = t_x 
-
+        
         D = self._batch_euclidean_dist(A=X, B=Y)
         D_flat = D.view(-1, t, t)
 
@@ -455,8 +442,173 @@ class PairwiseSoftDTW(torch.nn.Module):
             D_flat, 
             self.gamma, 
             self.bandwidth, 
-            requires_grad=False
+            False
         )
+
         D_dist = distances.view(n_a, n_b) 
-        
         return D_dist 
+
+
+    def forward_batched(self, X, Y, chunk_size = 1000):
+        """
+        Args:
+            X: Source timeseries of shape (n_a, length, feature_dim) 
+            Y: Target time series of shape (n_b, length, feature_dim)
+        Returns:
+            D_dist: (n_a, n_b) tensor of distances between each X_i and Y_j
+        """
+        # Ensure inputs are tensors on the correct device
+        device = 'cuda' if self.use_cuda else 'cpu'
+        if not isinstance(X, torch.Tensor): 
+            X = torch.from_numpy(X).to(dtype=self.precision, device=device)
+        if not isinstance(Y, torch.Tensor):
+            Y = torch.from_numpy(Y).to(dtype=self.precision, device=device)
+
+        n_a, t_x, d_x = X.shape
+        n_b, t_y, d_y = Y.shape
+        assert t_x == t_y, "Time lengths of X and Y must match"
+        assert d_x == d_y, "Feature dimensions of X and Y must match"
+
+        # We'll accumulate results here
+        D_dist = torch.empty((n_a, n_b), dtype=self.precision, device=device)
+
+        # Process Y in chunks to reduce memory footprint
+        for start_idx in range(0, n_b, chunk_size):
+            end_idx = min(start_idx + chunk_size, n_b)
+            Y_chunk = Y[start_idx:end_idx]  # shape: (chunk_size, t, d)
+
+            # Compute pairwise distances for this chunk
+            D = self._batch_euclidean_dist(X, Y_chunk)  # (n_a, chunk_size, t, t)
+
+            # Flatten for softDTW computation
+            t = t_x
+            D_flat = D.view(-1, t, t)
+
+            func_dtw = _SoftDTWCUDA.apply
+            distances = func_dtw(D_flat, self.gamma, self.bandwidth, False)
+            # Reshape the result
+            D_chunk_dist = distances.view(n_a, -1)  # (n_a, chunk_size)
+
+            # Store in the result tensor
+            D_dist[:, start_idx:end_idx] = D_chunk_dist
+
+        return D_dist
+
+
+class BatchedSoftDTW(torch.nn.Module):
+    def __init__(
+        self, 
+        gamma=1.0, 
+        precision=torch.float32, 
+        use_cuda=True, 
+        chunk_size=100
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.precision = precision
+        self.bandwidth = 0
+        self.use_cuda = use_cuda
+        self.chunk_size = chunk_size
+
+    @staticmethod
+    def _elementwise_euclidean_dist(X, Y):
+        """
+        Compute elementwise Euclidean distance matrices between corresponding pairs X[i], Y[i].
+        X, Y: (N, t, d)
+        Returns: D (N, t, t)
+        """
+        return torch.cdist(X, Y, p=2).pow(2)
+
+    @staticmethod
+    def _pairwise_euclidean_dist(A, B):
+        """
+        Compute pairwise Euclidean distance matrices for all pairs (A[i], B[j]).
+        A: (n_a, t, d)
+        B: (n_b, t, d)
+        Returns: (n_a, n_b, t, t)
+        """
+        A_exp = A.unsqueeze(1).unsqueeze(3)  # (n_a, 1, t, 1, d)
+        B_exp = B.unsqueeze(0).unsqueeze(2)  # (1, n_b, 1, t, d)
+        diff = A_exp - B_exp                  # (n_a, n_b, t, t, d)
+        dist_sq = (diff ** 2).sum(-1)         # (n_a, n_b, t, t)
+        return dist_sq
+
+    def _soft_dtw(self, D_flat, with_grads):
+        """
+        Apply Soft-DTW on a batch of cost matrices.
+        D_flat: (N, t, t)
+        Returns: distances (N,)
+        """
+        # Decide which kernel to use based on device
+        if self.use_cuda:
+            return _SoftDTWCUDA.apply(D_flat, self.gamma, self.bandwidth, with_grads)
+        else:
+            return _SoftDTW.apply(D_flat, self.gamma, self.bandwidth, with_grads)
+
+    def elementwise(self, X, Y, with_grads=True):
+        """
+        Computes Soft-DTW for each pair (X[i], Y[i]) -> returns (N,) distances.
+        X, Y: (N, t, d)
+
+        If with_grads=True, gradients are tracked. Otherwise no gradients are stored.
+        """
+        device = 'cuda' if self.use_cuda else 'cpu'
+        if not isinstance(X, torch.Tensor):
+            X = torch.from_numpy(X).to(device=device, dtype=self.precision)
+        if not isinstance(Y, torch.Tensor):
+            Y = torch.from_numpy(Y).to(device=device, dtype=self.precision)
+
+        n_x, t_x, d_x = X.shape
+        n_y, t_y, d_y = Y.shape
+        assert t_x == t_y, "Time lengths must match."
+        assert d_x == d_y, "Feature dimensions must match."
+        assert n_x == n_y, "Elementwise mode requires X and Y to have the same batch size."
+
+        grad_context = torch.enable_grad() if with_grads else torch.no_grad()
+        with grad_context:
+            distances_all = []
+            for start_idx in tqdm(range(0, n_x, self.chunk_size), desc="Processing elementwise chunks", unit="chunk"):
+                end_idx = min(start_idx + self.chunk_size, n_x)
+                X_chunk = X[start_idx:end_idx]
+                Y_chunk = Y[start_idx:end_idx]
+
+                D = self._elementwise_euclidean_dist(X_chunk, Y_chunk)  # (chunk_size, t, t)
+                distances_chunk = self._soft_dtw(D, with_grads)          # (chunk_size,)
+                distances_all.append(distances_chunk)
+
+            distances = torch.cat(distances_all, dim=0)  # (N,)
+            return distances
+
+    def pairwise(self, X, Y, with_grads=False):
+        """
+        Computes Soft-DTW for all pairs (X[i], Y[j]) -> returns (n_a, n_b).
+        X: (n_a, t, d)
+        Y: (n_b, t, d)
+
+        If with_grads=False, no gradients are tracked for these computations.
+        """
+        device = 'cuda' if self.use_cuda else 'cpu'
+        if not isinstance(X, torch.Tensor):
+            X = torch.from_numpy(X).to(device=device, dtype=self.precision)
+        if not isinstance(Y, torch.Tensor):
+            Y = torch.from_numpy(Y).to(device=device, dtype=self.precision)
+
+        n_a, t_x, d_x = X.shape
+        n_b, t_y, d_y = Y.shape
+        assert t_x == t_y, "Time lengths must match."
+        assert d_x == d_y, "Feature dimensions must match."
+
+        grad_context = torch.enable_grad() if with_grads else torch.no_grad()
+        with grad_context:
+            D_dist = torch.empty((n_a, n_b), dtype=self.precision, device=device)
+
+            # process Y in chunks to reduce memory usage
+            for start_idx in tqdm(range(0, n_b, self.chunk_size), desc="Processing pairwise distances", unit="chunk"):
+                end_idx = min(start_idx + self.chunk_size, n_b)
+                Y_chunk = Y[start_idx:end_idx]
+                D = self._pairwise_euclidean_dist(X, Y_chunk)  # (n_a, chunk_size, t, t)
+                D_flat = D.view(-1, t_x, t_x)
+                dist_chunk = self._soft_dtw(D_flat, with_grads) # (n_a * chunk_size)
+                D_chunk_dist = dist_chunk.view(n_a, -1)         # (n_a, chunk_size)
+                D_dist[:, start_idx:end_idx] = D_chunk_dist
+            return D_dist 

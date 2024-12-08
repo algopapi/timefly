@@ -9,4 +9,5 @@ src/timefly.egg-info/SOURCES.txt
 src/timefly.egg-info/dependency_links.txt
 src/timefly.egg-info/requires.txt
 src/timefly.egg-info/top_level.txt
-test/test_soft_dtw.py
+tests/test_k_means.py
+tests/test_soft_dtw.py

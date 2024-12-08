@@ -1,6 +1,5 @@
 numpy
-numba
+numba>=0.59
 torch
-torchvision
 tqdm
 pytest

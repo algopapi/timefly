@@ -1,7 +1,12 @@
 {
     "python.testing.pytestArgs": [
-    //  "-vv", 
-    //  "--full-trace", 
-        "-s"
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "python.testing.autoTestDiscoverOnSaveEnabled": true,
+    "editor.rulers": [
+        80,
+        120
     ],
 }
