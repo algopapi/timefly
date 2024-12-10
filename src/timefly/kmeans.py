@@ -1,7 +1,8 @@
 import torch
 import numpy as np
+from tqdm.auto import tqdm
+from timefly.soft_dtw import BatchedSoftDTW
 
-from timefly.soft_dtw import PairwiseSoftDTW, SoftDTW, BatchedSoftDTW
 
 class TimeSeriesKMeans:
     """TimeSeries K-Means clustering using SoftDTW and PyTorch.
@@ -54,23 +55,16 @@ class TimeSeriesKMeans:
         self.device = device
         self.n_init = n_init
         self.max_iter_barycenter = 10
-        # self.barycenter = SoftDTW(
-        #     use_cuda=True, 
-        #     requires_grad=True,
-        #     gamma=self.gamma,
-        # ) 
-
-        # self.distance = PairwiseSoftDTW(
-        #     gamma=self.gamma,
-        # )
 
         self.dtw = BatchedSoftDTW(
             gamma=self.gamma,
-            chunk_size=100,
+            chunk_size_pairwise=1000,
+            chunk_size_elementwise=2000,
+            use_cuda=True
         )
         self.optimizer = optimizer 
         self.optimizer_kwargs = optimizer_kwargs 
-        self.update_bs = 1000 
+        self.update_bs = 1000
 
     def fit(self, X):
         """
@@ -153,7 +147,13 @@ class TimeSeriesKMeans:
         # Initialize cluster centers using k-means++
         cluster_centers = self._k_means_init(X).clone().requires_grad_(True)
 
-        for i in range(self.max_iter):
+        for i in tqdm(
+            range(self.max_iter), 
+            desc="K-means iteration", 
+            unit="iter", 
+            leave=True, 
+            position=0
+        ):
             # Compute distances between each time series and each cluster center
             # distances = self.distance(X, cluster_centers)
             distances = self.dtw.pairwise(cluster_centers, X, with_grads=False).transpose(1, 0)
@@ -169,7 +169,13 @@ class TimeSeriesKMeans:
 
             # Update cluster centers
             new_centers = []
-            for k in range(self.n_clusters):
+            for k in tqdm(
+                range(self.n_clusters),
+                desc="Updating centroids",
+                unit="cluster",
+                leave=True,
+                position=1
+            ):
                 X_k = X[labels == k] # shape  = (t, d)
                 init_center = cluster_centers[k]
                 if X_k.nelement() == 0:
@@ -184,7 +190,7 @@ class TimeSeriesKMeans:
             
             # Convergence?
             if center_shift < self.tol:
-                print("converged")
+                print("Detected minimal center shifts... Converged...")
                 break
 
             cluster_centers = new_centers.clone().detach().requires_grad_(True)
@@ -230,7 +236,13 @@ class TimeSeriesKMeans:
 
         current_pot = closest_dist_sq.sum().item()
 
-        for c in range(1, n_clusters):
+        for c in tqdm(
+            range(1, n_clusters),
+            desc="Initializing centers...",
+            unit="cluster",
+            leave=True,
+            position=0
+        ):
             # Generate rand_vals using NumPy's random_state
             rand_vals_np = self.random_state.random_sample(n_local_trials) * current_pot
 
@@ -294,34 +306,37 @@ class TimeSeriesKMeans:
                 loss = sdtw_values.mean()
                 loss.backward()
                 return loss
-
             optimizer.step(closure)
+
         else: 
             optimizer = torch.optim.Adam([centroid], lr=lr)
-            for _ in range(num_iters):
+            for _ in tqdm(
+                range(num_iters), 
+                desc="centroid update step", 
+                unit="step", 
+                leave=True, 
+                position=2
+            ):
                 optimizer.zero_grad()
                 total_loss = 0.0
                 n_samples = X_cluster.shape[0]                
-                for i in range(0, n_samples, self.update_bs):
+                for i in tqdm(
+                    range(0, n_samples, self.update_bs), 
+                    desc="batch update", 
+                    unit="batch",
+                    leave=True, 
+                    position=3
+                ):
                     end = min(i + self.update_bs, n_samples)
                     batch_X = X_cluster[i:end]
                     centroid_expanded = centroid.unsqueeze(0).expand(
                         batch_X.shape[0], -1, -1
                     )
-                    # sdtw_values = self.barycenter(centroid_expanded, batch_X)
                     sdtw_values = self.dtw.elementwise(centroid_expanded, batch_X, with_grads=True)
                     loss = sdtw_values.mean()
                     loss.backward()
                     total_loss += loss.item() * batch_X.shape[0]
 
                 optimizer.step()
-
-                # centroid_expanded = centroid.unsqueeze(0).expand(
-                #     X_cluster.shape[0], -1, -1
-                # )
-                # sdtw_values = self.barycenter(centroid_expanded, X_cluster)
-                # loss = sdtw_values.mean()
-                # loss.backward()
-                # optimizer.step()
 
         return centroid.data

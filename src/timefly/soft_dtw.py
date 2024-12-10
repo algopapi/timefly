@@ -28,7 +28,7 @@ from numba import jit, prange
 from torch.autograd import Function
 from numba import cuda
 import math
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 # ----------------------------------------------------------------------------------------------------------------------
 @cuda.jit
@@ -501,14 +501,16 @@ class BatchedSoftDTW(torch.nn.Module):
         gamma=1.0, 
         precision=torch.float32, 
         use_cuda=True, 
-        chunk_size=100
+        chunk_size_pairwise=100,
+        chunk_size_elementwise=1000 # element wise chucksize can be larger
     ):
         super().__init__()
         self.gamma = gamma
         self.precision = precision
         self.bandwidth = 0
         self.use_cuda = use_cuda
-        self.chunk_size = chunk_size
+        self.chunk_size_pw = chunk_size_pairwise
+        self.chunk_size_ew = chunk_size_elementwise 
 
     @staticmethod
     def _elementwise_euclidean_dist(X, Y):
@@ -567,8 +569,14 @@ class BatchedSoftDTW(torch.nn.Module):
         grad_context = torch.enable_grad() if with_grads else torch.no_grad()
         with grad_context:
             distances_all = []
-            for start_idx in tqdm(range(0, n_x, self.chunk_size), desc="Processing elementwise chunks", unit="chunk"):
-                end_idx = min(start_idx + self.chunk_size, n_x)
+            for start_idx in tqdm(
+                range(0, n_x, self.chunk_size_ew)
+                , desc="Processing elementwise chunks", 
+                unit="chunk", 
+                leave=True,
+                position=3
+            ):
+                end_idx = min(start_idx + self.chunk_size_ew, n_x)
                 X_chunk = X[start_idx:end_idx]
                 Y_chunk = Y[start_idx:end_idx]
 
@@ -603,8 +611,14 @@ class BatchedSoftDTW(torch.nn.Module):
             D_dist = torch.empty((n_a, n_b), dtype=self.precision, device=device)
 
             # process Y in chunks to reduce memory usage
-            for start_idx in tqdm(range(0, n_b, self.chunk_size), desc="Processing pairwise distances", unit="chunk"):
-                end_idx = min(start_idx + self.chunk_size, n_b)
+            for start_idx in tqdm(
+                range(0, n_b, self.chunk_size_pw), 
+                desc="Processing pairwise distances",
+                unit="chunk", 
+                leave=True,
+                position=4
+            ):
+                end_idx = min(start_idx + self.chunk_size_pw, n_b)
                 Y_chunk = Y[start_idx:end_idx]
                 D = self._pairwise_euclidean_dist(X, Y_chunk)  # (n_a, chunk_size, t, t)
                 D_flat = D.view(-1, t_x, t_x)

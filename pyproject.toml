@@ -5,6 +5,9 @@ version = "0.0.1"
 requires-python = ">=3.12, <3.13"
 dependencies = ["numpy", "numba>=0.59", "torch", "tqdm", "pytest"]
 
+[project.optional-dependencies]
+plot = ["matplotlib", "seaborn"]
+
 # Comment this out if ur machine does not install the cuda compiled version 
 # of torch 
 
